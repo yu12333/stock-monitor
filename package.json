@@ -1,0 +1,15 @@
+{
+  "name": "stock-monitor",
+  "version": "1.0.0",
+  "description": "股票市场监控系统 - 收集美股、韩国、日本、A股数据并推送到微信",
+  "main": "stock_monitor.js",
+  "scripts": {
+    "start": "node stock_monitor.js morning",
+    "morning": "node stock_monitor.js morning",
+    "afternoon": "node stock_monitor.js afternoon",
+    "test": "node test.js"
+  },
+  "keywords": ["stock", "monitor", "wechat", "pushplus"],
+  "author": "",
+  "license": "MIT"
+}
