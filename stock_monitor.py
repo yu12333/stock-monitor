@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 股票市场监控脚本 - 增强版
-收集美股、韩国、日本、A股数据，包含板块强度和涨停信息
+收集美股、韩国、日本、A股数据，包含板块强度、涨跌家数、涨停跌停信息
 """
 
 import requests
@@ -64,26 +64,87 @@ def get_a_stock_index():
                 volume = float(fields[8]) / 100000000  # 转换为亿
                 change_pct = ((price - prev) / prev) * 100
                 
-                # 计算成交量变化（简化版，需要历史数据对比）
-                volume_status = "平量" if 0.8 <= volume/3000 <= 1.2 else ("放量" if volume/3000 > 1.2 else "缩量")
-                
                 results.append({
                     'name': name,
                     'price': price,
                     'change_pct': change_pct,
-                    'volume': volume,
-                    'volume_status': volume_status
+                    'volume': volume
                 })
         except Exception as e:
             print(f"获取{name}失败: {e}")
-            results.append({'name': name, 'price': 0, 'change_pct': 0, 'volume': 0, 'volume_status': ''})
+            results.append({'name': name, 'price': 0, 'change_pct': 0, 'volume': 0})
     
     return results
+
+def get_a_stock_market_stats():
+    """获取A股涨跌家数统计（使用东方财富API）"""
+    try:
+        # 东方财富市场概况API
+        url = "https://push2.eastmoney.com/api/qt/ulist.np/get"
+        params = {
+            'fltt': 2,
+            'fields': 'f104,f105,f106',
+            'secids': '1.000001'  # 上证指数
+        }
+        
+        response = requests.get(url, params=params, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        data = response.json()
+        
+        if 'data' in data and 'diff' in data['data']:
+            item = data['data']['diff'][0]
+            up_count = item.get('f104', 0)  # 上涨家数
+            down_count = item.get('f105', 0)  # 下跌家数
+            flat_count = item.get('f106', 0)  # 平盘家数
+            return {
+                'up': up_count,
+                'down': down_count,
+                'flat': flat_count
+            }
+    except Exception as e:
+        print(f"获取涨跌家数失败: {e}")
+    
+    return {'up': 0, 'down': 0, 'flat': 0}
+
+def get_limit_stats():
+    """获取涨停跌停统计"""
+    try:
+        # 涨停家数
+        url_up = "https://push2ex.eastmoney.com/getTopicZTPool"
+        params_up = {
+            'ut': '7eea3edcaed734bea9cb3e58b20a59fa',
+            'dpt': 'wz.ztzt',
+            'Ession': 'ztlb',
+            'date': datetime.now().strftime('%Y%m%d')
+        }
+        
+        response_up = requests.get(url_up, params=params_up, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        data_up = response_up.json()
+        limit_up_count = len(data_up.get('data', {}).get('pool', []))
+        
+        # 跌停家数
+        url_down = "https://push2ex.eastmoney.com/getTopicDTPool"
+        params_down = {
+            'ut': '7eea3edcaed734bea9cb3e58b20a59fa',
+            'dpt': 'wz.ztzt',
+            'Ession': 'dtlb',
+            'date': datetime.now().strftime('%Y%m%d')
+        }
+        
+        response_down = requests.get(url_down, params=params_down, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        data_down = response_down.json()
+        limit_down_count = len(data_down.get('data', {}).get('pool', []))
+        
+        return {
+            'limit_up': limit_up_count,
+            'limit_down': limit_down_count
+        }
+    except Exception as e:
+        print(f"获取涨跌停数据失败: {e}")
+        return {'limit_up': 0, 'limit_down': 0}
 
 def get_a_stock_sectors():
     """获取A股板块数据（使用东方财富API）"""
     try:
-        # 东方财富板块API
         url = "https://push2.eastmoney.com/api/qt/clist/get"
         params = {
             'pn': 1,
@@ -93,7 +154,7 @@ def get_a_stock_sectors():
             'fltt': 2,
             'invt': 2,
             'fid': 'f3',
-            'fs': 'b:BK0477+f:!50',
+            'fs': 'm:90+t:2',  # 行业板块
             'fields': 'f2,f3,f4,f12,f14'
         }
         
@@ -102,7 +163,7 @@ def get_a_stock_sectors():
         
         sectors = []
         if 'data' in data and 'diff' in data['data']:
-            for item in data['data']['diff'][:8]:  # 取前8个板块
+            for item in data['data']['diff'][:8]:
                 sectors.append({
                     'name': item.get('f14', ''),
                     'change_pct': item.get('f3', 0)
@@ -111,7 +172,6 @@ def get_a_stock_sectors():
         return sectors
     except Exception as e:
         print(f"获取板块数据失败: {e}")
-        # 返回模拟数据作为备选
         return [
             {'name': '半导体', 'change_pct': 2.5},
             {'name': '新能源', 'change_pct': 1.8},
@@ -120,10 +180,9 @@ def get_a_stock_sectors():
             {'name': '军工', 'change_pct': 0.8}
         ]
 
-def get_limit_up_stocks():
-    """获取涨停股票信息"""
+def get_top_limit_up_stocks():
+    """获取率先涨停的股票"""
     try:
-        # 东方财富涨停板API
         url = "https://push2ex.eastmoney.com/getTopicZTPool"
         params = {
             'ut': '7eea3edcaed734bea9cb3e58b20a59fa',
@@ -135,65 +194,20 @@ def get_limit_up_stocks():
         response = requests.get(url, params=params, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         data = response.json()
         
-        limit_up_count = 0
-        first_limit_up = []
-        
+        first_stocks = []
         if 'data' in data and 'pool' in data['data']:
-            pool = data['data']['pool']
-            limit_up_count = len(pool)
-            
-            # 获取最早涨停的股票（前5个）
-            for stock in pool[:5]:
-                first_limit_up.append({
+            for stock in data['data']['pool'][:5]:
+                first_stocks.append({
                     'name': stock.get('n', ''),
-                    'code': stock.get('c', ''),
-                    'time': stock.get('zttj', {}).get('fbt', '')
+                    'code': stock.get('c', '')
                 })
         
-        return {
-            'count': limit_up_count,
-            'first_stocks': first_limit_up
-        }
+        return first_stocks
     except Exception as e:
-        print(f"获取涨停数据失败: {e}")
-        return {'count': 0, 'first_stocks': []}
+        print(f"获取涨停股票失败: {e}")
+        return []
 
-def analyze_market_trend(a_data):
-    """分析市场趋势（放量/缩量）"""
-    if not a_data:
-        return ""
-    
-    # 取上证指数作为参考
-    sh_index = a_data[0]
-    volume = sh_index.get('volume', 0)
-    change_pct = sh_index.get('change_pct', 0)
-    
-    # 简化的放量/缩量判断（实际需要历史数据对比）
-    avg_volume = 3000  # 假设日均成交量3000亿
-    volume_ratio = volume / avg_volume if avg_volume > 0 else 1
-    
-    if volume_ratio > 1.3:
-        volume_desc = "放量"
-    elif volume_ratio < 0.7:
-        volume_desc = "缩量"
-    else:
-        volume_desc = "平量"
-    
-    # 趋势判断
-    if change_pct > 0 and volume_ratio > 1.2:
-        trend = f"{volume_desc}上攻，资金积极入场"
-    elif change_pct > 0 and volume_ratio < 0.8:
-        trend = f"{volume_desc}上涨，观望情绪浓厚"
-    elif change_pct < 0 and volume_ratio > 1.2:
-        trend = f"{volume_desc}下跌，恐慌抛售"
-    elif change_pct < 0 and volume_ratio < 0.8:
-        trend = f"{volume_desc}下跌，惜售明显"
-    else:
-        trend = f"成交量正常，市场平稳"
-    
-    return trend
-
-def format_message(us_data, kj_data, a_data, sectors=None, limit_up=None, trend="", analysis_type="morning"):
+def format_message(us_data, kj_data, a_data, sectors=None, market_stats=None, limit_stats=None, first_limit_ups=None, analysis_type="morning"):
     """格式化消息"""
     beijing_tz = pytz.timezone('Asia/Shanghai')
     now = datetime.now(beijing_tz)
@@ -219,9 +233,15 @@ def format_message(us_data, kj_data, a_data, sectors=None, limit_up=None, trend=
         arrow = "↑" if stock['change_pct'] >= 0 else "↓"
         message += f"{stock['name']}: {stock['price']:.2f} {arrow}{abs(stock['change_pct']):.2f}% 成交量:{stock['volume']:.0f}亿\n"
     
-    # 市场趋势分析
-    if trend:
-        message += f"\n📊 成交量分析: {trend}\n"
+    # 涨跌家数统计
+    if market_stats:
+        message += f"\n【涨跌家数】\n"
+        message += f"上涨: {market_stats['up']}家 | 下跌: {market_stats['down']}家 | 平盘: {market_stats['flat']}家\n"
+    
+    # 涨停跌停统计
+    if limit_stats:
+        message += f"\n【涨跌停统计】\n"
+        message += f"涨停: {limit_stats['limit_up']}家 | 跌停: {limit_stats['limit_down']}家\n"
     
     # 板块强度
     if sectors:
@@ -230,27 +250,31 @@ def format_message(us_data, kj_data, a_data, sectors=None, limit_up=None, trend=
             arrow = "↑" if sector['change_pct'] >= 0 else "↓"
             message += f"{i}. {sector['name']}: {arrow}{abs(sector['change_pct']):.2f}%\n"
     
-    # 涨停信息
-    if limit_up and limit_up.get('count', 0) > 0:
-        message += f"\n【涨停统计】涨停 {limit_up['count']} 家\n"
-        if limit_up.get('first_stocks'):
-            message += "率先涨停:\n"
-            for stock in limit_up['first_stocks'][:3]:
-                message += f"  • {stock['name']}\n"
+    # 率先涨停股票
+    if first_limit_ups:
+        message += "\n【率先涨停】\n"
+        for stock in first_limit_ups[:3]:
+            message += f"• {stock['name']}\n"
     
     # 收盘分析额外信息
     if analysis_type == "afternoon":
         message += "\n【收盘总结】\n"
         if a_data:
             sh = a_data[0]
+            if market_stats:
+                if market_stats['up'] > market_stats['down']:
+                    message += "涨多跌少，市场情绪乐观\n"
+                else:
+                    message += "跌多涨少，市场情绪谨慎\n"
+            
             if sh['change_pct'] > 1:
-                message += "大盘强势上涨，市场情绪乐观\n"
+                message += "大盘强势上涨"
             elif sh['change_pct'] > 0:
-                message += "大盘小幅上涨，市场情绪平稳\n"
+                message += "大盘小幅上涨"
             elif sh['change_pct'] > -1:
-                message += "大盘小幅下跌，市场情绪谨慎\n"
+                message += "大盘小幅下跌"
             else:
-                message += "大盘大幅下跌，注意风险控制\n"
+                message += "大盘大幅下跌，注意风险"
     
     return message
 
@@ -283,11 +307,12 @@ def main(analysis_type="morning"):
     kj_data = get_korea_japan_data()
     a_data = get_a_stock_index()
     sectors = get_a_stock_sectors()
-    limit_up = get_limit_up_stocks()
-    trend = analyze_market_trend(a_data)
+    market_stats = get_a_stock_market_stats()
+    limit_stats = get_limit_stats()
+    first_limit_ups = get_top_limit_up_stocks()
     
     # 格式化消息
-    message = format_message(us_data, kj_data, a_data, sectors, limit_up, trend, analysis_type)
+    message = format_message(us_data, kj_data, a_data, sectors, market_stats, limit_stats, first_limit_ups, analysis_type)
     
     # 推送
     send_to_wechat(message)
