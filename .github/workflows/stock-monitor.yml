@@ -2,9 +2,11 @@ name: 股票监控推送
 
 on:
   schedule:
-    - cron: '30 1 * * 1-5'
-    - cron: '0 2 * * 1-5'
-    - cron: '30 6 * * 1-5'
+    - cron: '30 1 * * 1-5'   # 北京时间 09:30 - 早盘播报
+    - cron: '0 2 * * 1-5'    # 北京时间 10:00 - 早盘播报
+    - cron: '30 3 * * 1-5'   # 北京时间 11:30 - 上午收盘播报
+    - cron: '30 5 * * 1-5'   # 北京时间 13:30 - 午盘播报
+    - cron: '30 6 * * 1-5'   # 北京时间 14:30 - A股收盘分析
   workflow_dispatch:
 
 jobs:
@@ -22,4 +24,20 @@ jobs:
       - name: 运行股票监控
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-        run: python stock_monitor.py morning
+        run: |
+          HOUR=$(date -u +%H)
+          MINUTE=$(date -u +%M)
+          
+          # 14:30 北京时间 = 06:30 UTC - 收盘分析
+          if [ "$HOUR" = "6" ] && [ "$MINUTE" = "30" ]; then
+            python stock_monitor.py afternoon
+          # 11:30 北京时间 = 03:30 UTC - 上午收盘播报
+          elif [ "$HOUR" = "3" ] && [ "$MINUTE" = "30" ]; then
+            python stock_monitor.py morning_close
+          # 13:30 北京时间 = 05:30 UTC - 午盘播报
+          elif [ "$HOUR" = "5" ] && [ "$MINUTE" = "30" ]; then
+            python stock_monitor.py noon
+          # 其他时间 - 早盘播报
+          else
+            python stock_monitor.py morning
+          fi
