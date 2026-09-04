@@ -32,7 +32,7 @@ jobs:
         with:
           python-version: '3.10'
       - name: 安装依赖
-        run: pip install requests pytz
+        run: pip install requests pytz akshare pandas numpy
       - name: 运行股票监控
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
