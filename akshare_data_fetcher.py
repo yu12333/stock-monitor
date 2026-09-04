@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 使用 akshare 获取A股数据的模块
-基于 daily_stock_analysis 项目的实现
+基于 daily_stock_analysis 项目的实现 - 精确计算涨跌停版本
 """
 
 import akshare as ak
 import pandas as pd
 import numpy as np
+import math
 import time
 import random
 import requests
@@ -31,11 +32,6 @@ USER_AGENTS = [
 
 def _set_random_user_agent():
     """设置随机 User-Agent"""
-    requests_headers = {
-        'User-Agent': random.choice(USER_AGENTS)
-    }
-    # 注意：akshare 底层使用 requests，这里设置全局 headers
-    # 实际上 akshare 内部有自己的 headers 处理，这里主要是为了兼容
     pass
 
 
@@ -64,16 +60,74 @@ def safe_int(value: Any) -> int:
         return 0
 
 
+def is_bse_code(code: str) -> bool:
+    """
+    检查是否为北交所股票代码
+    北交所规则 (2026):
+    - 新格式 (2024+): 92xxxx 主交易代码
+    - 历史范围: 43xxxx, 83xxxx, 87xxxx, 88xxxx
+    """
+    c = (code or "").strip().split(".")[0]
+    if len(c) != 6 or not c.isdigit():
+        return False
+    if c.startswith("900"):
+        return False
+    return c.startswith(("92", "43", "81", "82", "83", "87", "88"))
+
+
+def is_st_stock(name: str) -> bool:
+    """检查是否为ST股票"""
+    n = (name or "").upper()
+    return 'ST' in n
+
+
+def is_kc_cy_stock(code: str) -> bool:
+    """
+    检查是否为科创板或创业板股票
+    - 科创板: 688开头
+    - 创业板: 300开头
+    两者都有±20%的涨跌幅限制
+    """
+    c = (code or "").strip().split(".")[0]
+    return c.startswith("688") or c.startswith("30")
+
+
+def normalize_stock_code(code: str) -> str:
+    """标准化股票代码，去除前缀"""
+    if not code:
+        return ""
+    code = str(code).strip()
+    for prefix in ['sh', 'sz', 'bj', 'SH', 'SZ', 'BJ']:
+        if code.startswith(prefix):
+            code = code[len(prefix):]
+    return code
+
+
+def get_limit_ratio(code: str, name: str) -> float:
+    """
+    获取涨跌幅限制比例
+    - 北交所: 30%
+    - 科创板/创业板: 20%
+    - ST股票: 5%
+    - 其他主板: 10%
+    """
+    pure_code = normalize_stock_code(code)
+    if is_bse_code(pure_code):
+        return 0.30
+    if is_kc_cy_stock(pure_code):
+        return 0.20
+    if is_st_stock(name):
+        return 0.05
+    return 0.10
+
+
+def round_limit_price(prev_close: float, ratio: float) -> float:
+    """计算涨跌停价格（四舍五入保留2位小数）"""
+    return math.floor(prev_close * (1 + ratio) * 100 + 0.5) / 100.0
+
+
 def get_a_stock_index_eastmoney() -> List[Dict[str, Any]]:
-    """
-    使用东方财富API获取A股主要指数数据（备用方案）
-    
-    返回：
-    [
-        {'name': '上证指数', 'price': 3200.50, 'change_pct': 1.25, 'volume': 2500.0},
-        ...
-    ]
-    """
+    """使用东方财富API获取A股主要指数数据（备用方案）"""
     try:
         url = "https://push2.eastmoney.com/api/qt/ulist.np/get"
         params = {
@@ -101,20 +155,11 @@ def get_a_stock_index_eastmoney() -> List[Dict[str, Any]]:
 
 
 def get_a_stock_index() -> List[Dict[str, Any]]:
-    """
-    获取A股主要指数数据
-    
-    返回：
-    [
-        {'name': '上证指数', 'price': 3200.50, 'change_pct': 1.25, 'volume': 2500.0},
-        ...
-    ]
-    """
+    """获取A股主要指数数据"""
     try:
         _set_random_user_agent()
         _enforce_rate_limit()
         
-        # 使用 akshare 获取指数行情（新浪财经接口）
         logger.info("[API调用] ak.stock_zh_index_spot_sina() 获取指数行情...")
         df = ak.stock_zh_index_spot_sina()
         
@@ -122,7 +167,6 @@ def get_a_stock_index() -> List[Dict[str, Any]]:
             logger.warning("[API返回] 指数行情数据为空，尝试使用东方财富API")
             return get_a_stock_index_eastmoney()
         
-        # 定义要获取的指数
         indices_map = {
             'sh000001': '上证指数',
             'sz399001': '深证成指',
@@ -134,14 +178,13 @@ def get_a_stock_index() -> List[Dict[str, Any]]:
         for code, name in indices_map.items():
             row = df[df['代码'] == code]
             if row.empty:
-                # 尝试带前缀查找
                 row = df[df['代码'].str.contains(code)]
             
             if not row.empty:
                 row = row.iloc[0]
                 price = safe_float(row.get('最新价', 0))
                 change_pct = safe_float(row.get('涨跌幅', 0))
-                volume = safe_float(row.get('成交额', 0)) / 100000000  # 转换为亿
+                volume = safe_float(row.get('成交额', 0)) / 100000000
                 
                 results.append({
                     'name': name,
@@ -160,12 +203,7 @@ def get_a_stock_index() -> List[Dict[str, Any]]:
 
 
 def get_market_stats_eastmoney() -> Dict[str, int]:
-    """
-    使用东方财富API获取市场涨跌统计（备用方案）
-    
-    返回：
-    {'up': 1500, 'down': 800, 'flat': 200, 'limit_up': 50, 'limit_down': 10}
-    """
+    """使用东方财富API获取市场涨跌统计（备用方案）"""
     try:
         url = "https://push2.eastmoney.com/api/qt/clist/get"
         params = {
@@ -176,19 +214,12 @@ def get_market_stats_eastmoney() -> Dict[str, int]:
             'fltt': 2,
             'invt': 2,
             'fid': 'f3',
-            'fs': 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23',  # A股
+            'fs': 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23',
             'fields': 'f104,f105,f106'
         }
         response = requests.get(url, params=params, headers={'User-Agent': random.choice(USER_AGENTS)}, timeout=10)
         data = response.json()
         
-        if 'data' in data and 'total' in data['data']:
-            # 通过总数计算
-            total = data['data']['total']
-            # 这个API不直接返回涨跌家数，需要用其他方式
-            pass
-        
-        # 使用沪深两市分别获取
         sh_url = "https://push2.eastmoney.com/api/qt/ulist.np/get"
         sh_params = {
             'fltt': 2,
@@ -215,10 +246,12 @@ def get_market_stats_eastmoney() -> Dict[str, int]:
 
 def get_market_stats() -> Dict[str, int]:
     """
-    获取市场涨跌统计
+    获取市场涨跌统计（精确计算版本）
     
-    返回：
-    {'up': 1500, 'down': 800, 'flat': 200, 'limit_up': 50, 'limit_down': 10}
+    基于 daily_stock_analysis 的实现，精确计算涨跌停：
+    - 考虑不同板块的涨跌幅限制（主板10%，创业板/科创板20%，北交所30%，ST股5%）
+    - 计算精确的涨跌停价格（昨收 * (1 ± 比例)，四舍五入保留2位小数）
+    - 使用容差比较来判断是否涨跌停
     """
     try:
         _set_random_user_agent()
@@ -239,28 +272,42 @@ def get_market_stats() -> Dict[str, int]:
         limit_down_count = 0
         
         for _, row in df.iterrows():
+            code = str(row.get('代码', ''))
+            name = str(row.get('名称', ''))
             current_price = safe_float(row.get('最新价'))
             pre_close = safe_float(row.get('昨收'))
             
+            # 跳过无效数据
             if current_price == 0 or pre_close == 0:
                 continue
             
-            # 计算涨跌幅
-            change_pct = (current_price - pre_close) / pre_close * 100
+            # 获取涨跌幅限制比例
+            ratio = get_limit_ratio(code, name)
             
-            if change_pct > 0:
+            # 计算涨跌停价格
+            limit_up_price = round_limit_price(pre_close, ratio)
+            limit_down_price = math.floor(pre_close * (1 - ratio) * 100 + 0.5) / 100.0
+            
+            # 计算容差
+            limit_up_tolerance = round(abs(pre_close * (1 + ratio) - limit_up_price), 10)
+            limit_down_tolerance = round(abs(pre_close * (1 - ratio) - limit_down_price), 10)
+            
+            # 判断涨跌停（精确比较）
+            is_limit_up = abs(current_price - limit_up_price) <= limit_up_tolerance
+            is_limit_down = abs(current_price - limit_down_price) <= limit_down_tolerance
+            
+            if is_limit_up:
+                limit_up_count += 1
+            if is_limit_down:
+                limit_down_count += 1
+            
+            # 计算涨跌
+            if current_price > pre_close:
                 up_count += 1
-            elif change_pct < 0:
+            elif current_price < pre_close:
                 down_count += 1
             else:
                 flat_count += 1
-            
-            # 计算涨跌停（简化版，精确计算需要更复杂的逻辑）
-            if abs(change_pct) >= 9.9:  # 接近10%涨跌幅
-                if change_pct > 0:
-                    limit_up_count += 1
-                else:
-                    limit_down_count += 1
         
         return {
             'up': up_count,
@@ -276,15 +323,9 @@ def get_market_stats() -> Dict[str, int]:
 
 
 def get_limit_stats_eastmoney() -> Dict[str, int]:
-    """
-    使用东方财富API获取涨跌停统计（备用方案）
-    
-    返回：
-    {'limit_up': 50, 'limit_down': 10}
-    """
+    """使用东方财富API获取涨跌停统计（备用方案）"""
     today = datetime.now().strftime('%Y%m%d')
     
-    # 涨停
     limit_up = 0
     try:
         url_up = "https://push2ex.eastmoney.com/getTopicZTPool"
@@ -301,7 +342,6 @@ def get_limit_stats_eastmoney() -> Dict[str, int]:
     except Exception as e:
         logger.error(f"[API错误] 使用东方财富API获取涨停失败: {e}")
     
-    # 跌停
     limit_down = 0
     try:
         url_down = "https://push2ex.eastmoney.com/getTopicDTPool"
@@ -324,9 +364,7 @@ def get_limit_stats_eastmoney() -> Dict[str, int]:
 def get_limit_stats() -> Dict[str, int]:
     """
     获取涨跌停统计
-    
-    返回：
-    {'limit_up': 50, 'limit_down': 10}
+    返回：{'limit_up': 50, 'limit_down': 10}
     """
     try:
         _set_random_user_agent()
@@ -334,30 +372,30 @@ def get_limit_stats() -> Dict[str, int]:
         
         today = datetime.now().strftime('%Y%m%d')
         
-        # 获取涨停池
         logger.info(f"[API调用] ak.stock_zt_pool_em(date={today}) 获取涨停池...")
         df_up = ak.stock_zt_pool_em(date=today)
         limit_up = len(df_up) if df_up is not None and not df_up.empty else 0
         
-        # 获取跌停池
         logger.info(f"[API调用] ak.stock_zt_pool_dtgc_em(date={today}) 获取跌停池...")
         df_down = ak.stock_zt_pool_dtgc_em(date=today)
         limit_down = len(df_down) if df_down is not None and not df_down.empty else 0
         
+        # 如果akshare获取失败，使用从实时行情计算的结果
+        if limit_up == 0 and limit_down == 0:
+            logger.info("[API返回] 涨跌停池数据为空，从实时行情计算涨跌停统计")
+            stats = get_market_stats()
+            return {'limit_up': stats['limit_up'], 'limit_down': stats['limit_down']}
+        
         return {'limit_up': limit_up, 'limit_down': limit_down}
         
     except Exception as e:
-        logger.error(f"[API错误] 获取涨跌停统计失败，尝试使用东方财富API: {e}")
-        return get_limit_stats_eastmoney()
+        logger.error(f"[API错误] 获取涨跌停统计失败: {e}")
+        stats = get_market_stats()
+        return {'limit_up': stats['limit_up'], 'limit_down': stats['limit_down']}
 
 
 def get_sectors_eastmoney() -> List[Dict[str, Any]]:
-    """
-    使用东方财富API获取板块涨幅排名（备用方案）
-    
-    返回：
-    [{'name': '半导体', 'change_pct': 3.5}, ...]
-    """
+    """使用东方财富API获取板块涨幅排名（备用方案）"""
     try:
         url = "https://push2.eastmoney.com/api/qt/clist/get"
         params = {
@@ -388,12 +426,7 @@ def get_sectors_eastmoney() -> List[Dict[str, Any]]:
 
 
 def get_sectors() -> List[Dict[str, Any]]:
-    """
-    获取板块涨幅排名
-    
-    返回：
-    [{'name': '半导体', 'change_pct': 3.5}, ...]
-    """
+    """获取板块涨幅排名"""
     try:
         _set_random_user_agent()
         _enforce_rate_limit()
@@ -405,11 +438,9 @@ def get_sectors() -> List[Dict[str, Any]]:
             logger.warning("[API返回] 行业板块数据为空，尝试使用东方财富API")
             return get_sectors_eastmoney()
         
-        # 按涨跌幅排序
         df['涨跌幅'] = pd.to_numeric(df['涨跌幅'], errors='coerce')
         df = df.dropna(subset=['涨跌幅'])
         
-        # 获取涨幅前8的板块
         top_sectors = df.nlargest(8, '涨跌幅')
         
         sectors = []
@@ -427,12 +458,7 @@ def get_sectors() -> List[Dict[str, Any]]:
 
 
 def get_first_limit_ups_eastmoney() -> List[Dict[str, str]]:
-    """
-    使用东方财富API获取率先涨停的股票（备用方案）
-    
-    返回：
-    [{'name': '股票名称'}, ...]
-    """
+    """使用东方财富API获取率先涨停的股票（备用方案）"""
     try:
         today = datetime.now().strftime('%Y%m%d')
         url = "https://push2ex.eastmoney.com/getTopicZTPool"
@@ -456,12 +482,7 @@ def get_first_limit_ups_eastmoney() -> List[Dict[str, str]]:
 
 
 def get_first_limit_ups() -> List[Dict[str, str]]:
-    """
-    获取率先涨停的股票
-    
-    返回：
-    [{'name': '股票名称'}, ...]
-    """
+    """获取率先涨停的股票"""
     try:
         _set_random_user_agent()
         _enforce_rate_limit()
@@ -475,12 +496,10 @@ def get_first_limit_ups() -> List[Dict[str, str]]:
             logger.warning("[API返回] 涨停池数据为空，尝试使用东方财富API")
             return get_first_limit_ups_eastmoney()
         
-        # 按首次封板时间排序
         if '首次封板时间' in df.columns:
             df['首次封板时间'] = pd.to_numeric(df['首次封板时间'], errors='coerce')
             df = df.sort_values('首次封板时间')
         
-        # 获取前5只率先涨停的股票
         stocks = []
         for _, row in df.head(5).iterrows():
             name = row.get('名称', '')
@@ -495,7 +514,6 @@ def get_first_limit_ups() -> List[Dict[str, str]]:
 
 
 if __name__ == "__main__":
-    # 测试代码
     print("测试A股指数获取:")
     print(get_a_stock_index())
     
