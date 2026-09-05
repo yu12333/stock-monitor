@@ -41,6 +41,11 @@ jobs:
       - name: 运行股票监控
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          # 清除代理设置，避免代理问题
+          HTTP_PROXY: ''
+          HTTPS_PROXY: ''
+          http_proxy: ''
+          https_proxy: ''
         run: |
           # 获取北京时间
           BEIJING_HOUR=$(TZ='Asia/Shanghai' date +%H)
@@ -50,7 +55,6 @@ jobs:
           
           # 判断运行类型
           if [ "${{ github.event.inputs.analysis_type }}" != "" ] && [ "${{ github.event.inputs.analysis_type }}" != "auto" ]; then
-            # 手动触发，使用指定类型
             TYPE="${{ github.event.inputs.analysis_type }}"
           elif [ "$BEIJING_HOUR" = "14" ] && [ "$BEIJING_MINUTE" = "30" ]; then
             TYPE="afternoon"
