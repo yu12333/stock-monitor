@@ -9,6 +9,7 @@ import requests
 import json
 import os
 from datetime import datetime
+from typing import Dict, List, Any
 import pytz
 
 # 导入数据获取模块
@@ -102,7 +103,7 @@ def _describe_turnover(total_amount: float) -> str:
     return "暂无数据"
 
 
-def build_stats_block(market_stats: Dict) -> str:
+def build_stats_block(market_stats: Dict[str, Any]) -> str:
     """
     构建盘面总览表格
     直接复制自 daily_stock_analysis/src/market_analyzer.py._build_stats_block
