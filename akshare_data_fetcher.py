@@ -2,18 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 A股数据获取模块
-直接复制自 daily_stock_analysis 的数据获取逻辑
-支持多个数据源：TickFlow、Tushare、Akshare、Efinance
+直接复制自 daily_stock_analysis 的 EfinanceFetcher 实现
+使用 efinance 一次性获取全量数据
 """
 
 import akshare as ak
 import pandas as pd
 import numpy as np
-import math
 import time
 import random
-import requests
-import os
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 import logging
@@ -29,10 +26,6 @@ def safe_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
-
-
-def _enforce_rate_limit():
-    time.sleep(random.uniform(0.3, 0.8))
 
 
 def normalize_stock_code(code: str) -> str:
@@ -63,363 +56,152 @@ def is_kc_cy_stock(code: str) -> bool:
     return c.startswith("688") or c.startswith("30")
 
 
-# ==================== 数据源1: TickFlow ====================
-
-def _fetch_by_tickflow() -> Optional[Dict[str, Any]]:
-    """使用 TickFlow 获取数据（需要 API Key）"""
-    api_key = os.environ.get('TICKFLOW_API_KEY', '').strip()
-    if not api_key:
-        logger.info("[TickFlow] 未配置 API Key，跳过")
+def _calc_market_stats(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    """
+    从行情 DataFrame 计算涨跌统计
+    直接复制自 daily_stock_analysis/data_provider/efinance_fetcher.py
+    """
+    df = df.copy()
+    
+    # 提取列名（兼容不同接口）
+    code_col = next((c for c in ['代码', '股票代码', 'ts_code', 'stock_code'] if c in df.columns), None)
+    name_col = next((c for c in ['名称', '股票名称', 'name'] if c in df.columns), None)
+    close_col = next((c for c in ['最新价', 'close', 'lastPrice'] if c in df.columns), None)
+    pre_close_col = next((c for c in ['昨收', '昨日收盘', 'pre_close', 'lastClose'] if c in df.columns), None)
+    amount_col = next((c for c in ['成交额', 'amount'] if c in df.columns), None)
+    
+    if not all([code_col, name_col, close_col, pre_close_col]):
+        logger.error(f"缺少必要列: {df.columns.tolist()}")
         return None
     
-    try:
-        _enforce_rate_limit()
-        logger.info("[TickFlow] 尝试获取数据...")
-        
-        # TickFlow API 调用
-        # 这里需要根据 TickFlow 的实际 API 实现
-        # 暂时返回 None，让其他数据源处理
-        logger.info("[TickFlow] 暂未实现，跳过")
-        return None
-    except Exception as e:
-        logger.warning(f"[TickFlow] 失败: {e}")
-        return None
+    limit_up_count = 0
+    limit_down_count = 0
+    up_count = 0
+    down_count = 0
+    flat_count = 0
+    total_amount = 0.0
 
+    for code, name, current_price, pre_close, amount in zip(
+        df[code_col], df[name_col], df[close_col], df[pre_close_col], df[amount_col]
+    ):
+        # 停牌过滤
+        if pd.isna(current_price) or pd.isna(pre_close) or current_price in ['-'] or pre_close in ['-'] or amount == 0:
+            continue
+        
+        current_price = float(current_price)
+        pre_close = float(pre_close)
+        total_amount += float(amount)
+        
+        pure_code = normalize_stock_code(str(code))
 
-# ==================== 数据源2: Tushare ====================
+        # 确定涨跌幅比例
+        if is_bse_code(pure_code):
+            ratio = 0.30
+        elif is_kc_cy_stock(pure_code):
+            ratio = 0.20
+        elif is_st_stock(name):
+            ratio = 0.05
+        else:
+            ratio = 0.10
 
-def _fetch_by_tushare() -> Optional[Dict[str, Any]]:
-    """使用 Tushare 获取数据（需要 Token）"""
-    token = os.environ.get('TUSHARE_TOKEN', '').strip()
-    if not token:
-        logger.info("[Tushare] 未配置 Token，跳过")
-        return None
-    
-    try:
-        _enforce_rate_limit()
-        logger.info("[Tushare] 尝试获取数据...")
-        
-        import tushare as ts
-        pro = ts.pro_api(token)
-        
-        # 获取每日指标
-        today = datetime.now().strftime('%Y%m%d')
-        df = pro.daily_basic(ts_code='', trade_date=today, 
-                            fields='ts_code,close,pre_close,turnover_rate,pct_chg')
-        
-        if df is None or df.empty:
-            logger.warning("[Tushare] 返回空数据")
-            return None
-        
-        logger.info(f"[Tushare] 获取到 {len(df)} 条数据")
-        
-        # 计算涨跌统计
-        up_count = 0
-        down_count = 0
-        flat_count = 0
-        limit_up_count = 0
-        limit_down_count = 0
-        
-        for _, row in df.iterrows():
-            code = str(row.get('ts_code', ''))
-            pct_chg = safe_float(row.get('pct_chg'))
-            close = safe_float(row.get('close'))
-            pre_close = safe_float(row.get('pre_close'))
-            
-            if close == 0 or pre_close == 0:
-                continue
-            
-            pure_code = normalize_stock_code(code)
-            
-            # 确定涨跌幅比例
-            if is_bse_code(pure_code):
-                ratio = 0.30
-            elif is_kc_cy_stock(pure_code):
-                ratio = 0.20
-            else:
-                ratio = 0.10
-            
-            # 计算涨跌停价
-            limit_up_price = np.floor(pre_close * (1 + ratio) * 100 + 0.5) / 100.0
-            limit_down_price = np.floor(pre_close * (1 - ratio) * 100 + 0.5) / 100.0
-            
-            limit_up_tolerance = round(abs(pre_close * (1 + ratio) - limit_up_price), 10)
-            limit_down_tolerance = round(abs(pre_close * (1 - ratio) - limit_down_price), 10)
-            
-            if abs(close - limit_up_price) <= limit_up_tolerance:
+        # 计算涨跌停价
+        limit_up_price = np.floor(pre_close * (1 + ratio) * 100 + 0.5) / 100.0
+        limit_down_price = np.floor(pre_close * (1 - ratio) * 100 + 0.5) / 100.0
+
+        limit_up_tolerance = round(abs(pre_close * (1 + ratio) - limit_up_price), 10)
+        limit_down_tolerance = round(abs(pre_close * (1 - ratio) - limit_down_price), 10)
+
+        # 精确比对
+        if current_price > 0:
+            is_limit_up = abs(current_price - limit_up_price) <= limit_up_tolerance
+            is_limit_down = abs(current_price - limit_down_price) <= limit_down_tolerance
+
+            if is_limit_up:
                 limit_up_count += 1
-            if abs(close - limit_down_price) <= limit_down_tolerance:
+            if is_limit_down:
                 limit_down_count += 1
-            
-            if pct_chg > 0:
+
+            if current_price > pre_close:
                 up_count += 1
-            elif pct_chg < 0:
+            elif current_price < pre_close:
                 down_count += 1
             else:
                 flat_count += 1
-        
-        result = {
-            'up_count': up_count,
-            'down_count': down_count,
-            'flat_count': flat_count,
-            'limit_up_count': limit_up_count,
-            'limit_down_count': limit_down_count,
-            'total_amount': 0.0,  # Tushare 需要额外接口获取成交额
-        }
-        logger.info(f"[Tushare] 计算完成: 上涨{up_count} 下跌{down_count} 涨停{limit_up_count} 跌停{limit_down_count}")
-        return result
-    except Exception as e:
-        logger.warning(f"[Tushare] 失败: {e}")
-        return None
+            
+    return {
+        'up_count': up_count,
+        'down_count': down_count,
+        'flat_count': flat_count,
+        'limit_up_count': limit_up_count,
+        'limit_down_count': limit_down_count,
+        'total_amount': total_amount / 1e8,
+    }
 
-
-# ==================== 数据源3: Efinance ====================
-
-def _fetch_by_efinance() -> Optional[Dict[str, Any]]:
-    """使用 Efinance 获取数据"""
-    try:
-        _enforce_rate_limit()
-        logger.info("[Efinance] 尝试获取数据...")
-        
-        import efinance as ef
-        df = ef.stock.get_realtime_quotes()
-        
-        if df is None or df.empty:
-            logger.warning("[Efinance] 返回空数据")
-            return None
-        
-        logger.info(f"[Efinance] 获取到 {len(df)} 条数据")
-        
-        # 提取列名
-        code_col = next((c for c in ['股票代码', '代码', 'code'] if c in df.columns), None)
-        name_col = next((c for c in ['股票名称', '名称', 'name'] if c in df.columns), None)
-        close_col = next((c for c in ['最新价', 'close', 'lastPrice'] if c in df.columns), None)
-        pre_close_col = next((c for c in ['昨收', '昨收盘', 'pre_close'] if c in df.columns), None)
-        amount_col = next((c for c in ['成交额', 'amount'] if c in df.columns), None)
-        
-        if not all([code_col, name_col, close_col, pre_close_col]):
-            logger.error(f"[Efinance] 缺少必要列: {df.columns.tolist()}")
-            return None
-        
-        up_count = 0
-        down_count = 0
-        flat_count = 0
-        limit_up_count = 0
-        limit_down_count = 0
-        total_amount = 0.0
-        
-        for _, row in df.iterrows():
-            code = str(row[code_col])
-            name = str(row[name_col])
-            current_price = row[close_col]
-            pre_close = row[pre_close_col]
-            
-            if pd.isna(current_price) or pd.isna(pre_close) or current_price in ['-'] or pre_close in ['-']:
-                continue
-            
-            amount = 0
-            if amount_col and amount_col in df.columns:
-                try:
-                    amount = float(row[amount_col])
-                except:
-                    amount = 0
-            
-            if amount == 0:
-                continue
-            
-            total_amount += amount
-            current_price = float(current_price)
-            pre_close = float(pre_close)
-            
-            pure_code = normalize_stock_code(code)
-            
-            if is_bse_code(pure_code):
-                ratio = 0.30
-            elif is_kc_cy_stock(pure_code):
-                ratio = 0.20
-            elif is_st_stock(name):
-                ratio = 0.05
-            else:
-                ratio = 0.10
-            
-            limit_up_price = np.floor(pre_close * (1 + ratio) * 100 + 0.5) / 100.0
-            limit_down_price = np.floor(pre_close * (1 - ratio) * 100 + 0.5) / 100.0
-            
-            limit_up_tolerance = round(abs(pre_close * (1 + ratio) - limit_up_price), 10)
-            limit_down_tolerance = round(abs(pre_close * (1 - ratio) - limit_down_price), 10)
-            
-            if current_price > 0:
-                if abs(current_price - limit_up_price) <= limit_up_tolerance:
-                    limit_up_count += 1
-                if abs(current_price - limit_down_price) <= limit_down_tolerance:
-                    limit_down_count += 1
-                
-                if current_price > pre_close:
-                    up_count += 1
-                elif current_price < pre_close:
-                    down_count += 1
-                else:
-                    flat_count += 1
-        
-        result = {
-            'up_count': up_count,
-            'down_count': down_count,
-            'flat_count': flat_count,
-            'limit_up_count': limit_up_count,
-            'limit_down_count': limit_down_count,
-            'total_amount': total_amount / 1e8,
-        }
-        logger.info(f"[Efinance] 计算完成: 上涨{up_count} 下跌{down_count} 涨停{limit_up_count} 跌停{limit_down_count}")
-        return result
-    except Exception as e:
-        logger.warning(f"[Efinance] 失败: {e}")
-        return None
-
-
-# ==================== 数据源4: Akshare ====================
-
-def _fetch_by_akshare() -> Optional[Dict[str, Any]]:
-    """使用 Akshare 获取数据"""
-    try:
-        _enforce_rate_limit()
-        logger.info("[Akshare] 尝试获取数据...")
-        
-        import akshare as ak
-        df = ak.stock_zh_a_spot_em()
-        
-        if df is None or df.empty:
-            logger.warning("[Akshare] 返回空数据")
-            return None
-        
-        logger.info(f"[Akshare] 获取到 {len(df)} 条数据")
-        
-        code_col = next((c for c in ['代码', '股票代码'] if c in df.columns), None)
-        name_col = next((c for c in ['名称', '股票名称'] if c in df.columns), None)
-        close_col = next((c for c in ['最新价', 'close'] if c in df.columns), None)
-        pre_close_col = next((c for c in ['昨收', 'pre_close'] if c in df.columns), None)
-        amount_col = next((c for c in ['成交额', 'amount'] if c in df.columns), None)
-        
-        if not all([code_col, name_col, close_col, pre_close_col]):
-            logger.error(f"[Akshare] 缺少必要列")
-            return None
-        
-        up_count = 0
-        down_count = 0
-        flat_count = 0
-        limit_up_count = 0
-        limit_down_count = 0
-        total_amount = 0.0
-        
-        for _, row in df.iterrows():
-            code = str(row[code_col])
-            name = str(row[name_col])
-            current_price = row[close_col]
-            pre_close = row[pre_close_col]
-            
-            if pd.isna(current_price) or pd.isna(pre_close) or current_price in ['-'] or pre_close in ['-']:
-                continue
-            
-            amount = 0
-            if amount_col and amount_col in df.columns:
-                try:
-                    amount = float(row[amount_col])
-                except:
-                    amount = 0
-            
-            if amount == 0:
-                continue
-            
-            total_amount += amount
-            current_price = float(current_price)
-            pre_close = float(pre_close)
-            
-            pure_code = normalize_stock_code(code)
-            
-            if is_bse_code(pure_code):
-                ratio = 0.30
-            elif is_kc_cy_stock(pure_code):
-                ratio = 0.20
-            elif is_st_stock(name):
-                ratio = 0.05
-            else:
-                ratio = 0.10
-            
-            limit_up_price = np.floor(pre_close * (1 + ratio) * 100 + 0.5) / 100.0
-            limit_down_price = np.floor(pre_close * (1 - ratio) * 100 + 0.5) / 100.0
-            
-            limit_up_tolerance = round(abs(pre_close * (1 + ratio) - limit_up_price), 10)
-            limit_down_tolerance = round(abs(pre_close * (1 - ratio) - limit_down_price), 10)
-            
-            if current_price > 0:
-                if abs(current_price - limit_up_price) <= limit_up_tolerance:
-                    limit_up_count += 1
-                if abs(current_price - limit_down_price) <= limit_down_tolerance:
-                    limit_down_count += 1
-                
-                if current_price > pre_close:
-                    up_count += 1
-                elif current_price < pre_close:
-                    down_count += 1
-                else:
-                    flat_count += 1
-        
-        result = {
-            'up_count': up_count,
-            'down_count': down_count,
-            'flat_count': flat_count,
-            'limit_up_count': limit_up_count,
-            'limit_down_count': limit_down_count,
-            'total_amount': total_amount / 1e8,
-        }
-        logger.info(f"[Akshare] 计算完成: 上涨{up_count} 下跌{down_count} 涨停{limit_up_count} 跌停{limit_down_count}")
-        return result
-    except Exception as e:
-        logger.warning(f"[Akshare] 失败: {e}")
-        return None
-
-
-# ==================== 主函数：多数据源自动切换 ====================
 
 def get_market_stats() -> Dict[str, Any]:
     """
     获取市场涨跌统计
-    直接复制自 daily_stock_analysis 的 DataManager.get_market_stats 逻辑
-    数据源优先级：TickFlow -> Tushare -> Efinance -> Akshare
+    直接复制自 daily_stock_analysis 的 EfinanceFetcher
+    使用 efinance 一次性获取全量数据
     """
     default_result = {
         'up_count': 0, 'down_count': 0, 'flat_count': 0,
         'limit_up_count': 0, 'limit_down_count': 0, 'total_amount': 0.0
     }
     
-    # 尝试数据源1: TickFlow
-    result = _fetch_by_tickflow()
-    if result and (result['up_count'] > 0 or result['down_count'] > 0):
-        return result
+    try:
+        import efinance as ef
+        
+        logger.info("[Efinance] 获取全市场实时行情...")
+        df = ef.stock.get_realtime_quotes()
+        
+        if df is None or df.empty:
+            logger.warning("[Efinance] 返回空数据")
+            return default_result
+        
+        logger.info(f"[Efinance] 获取到 {len(df)} 只股票")
+        
+        result = _calc_market_stats(df)
+        if result:
+            logger.info(f"[Efinance] 上涨:{result['up_count']} 下跌:{result['down_count']} "
+                       f"涨停:{result['limit_up_count']} 跌停:{result['limit_down_count']} "
+                       f"成交额:{result['total_amount']:.0f}亿")
+            return result
+        
+    except ImportError:
+        logger.warning("[Efinance] 未安装 efinance 库，尝试 akshare...")
+    except Exception as e:
+        logger.warning(f"[Efinance] 失败: {e}，尝试 akshare...")
     
-    # 尝试数据源2: Tushare
-    result = _fetch_by_tushare()
-    if result and (result['up_count'] > 0 or result['down_count'] > 0):
-        return result
+    # 备用方案：akshare
+    try:
+        import akshare as ak
+        
+        logger.info("[Akshare] 获取全市场实时行情...")
+        df = ak.stock_zh_a_spot_em()
+        
+        if df is None or df.empty:
+            logger.warning("[Akshare] 返回空数据")
+            return default_result
+        
+        logger.info(f"[Akshare] 获取到 {len(df)} 只股票")
+        
+        result = _calc_market_stats(df)
+        if result:
+            logger.info(f"[Akshare] 上涨:{result['up_count']} 下跌:{result['down_count']} "
+                       f"涨停:{result['limit_up_count']} 跌停:{result['limit_down_count']} "
+                       f"成交额:{result['total_amount']:.0f}亿")
+            return result
+        
+    except Exception as e:
+        logger.error(f"[Akshare] 失败: {e}")
     
-    # 尝试数据源3: Efinance
-    result = _fetch_by_efinance()
-    if result and (result['up_count'] > 0 or result['down_count'] > 0):
-        return result
-    
-    # 尝试数据源4: Akshare
-    result = _fetch_by_akshare()
-    if result and (result['up_count'] > 0 or result['down_count'] > 0):
-        return result
-    
-    logger.error("所有数据源都失败，返回默认值")
     return default_result
 
 
 def get_a_stock_index() -> List[Dict[str, Any]]:
     """获取A股主要指数"""
     try:
-        _enforce_rate_limit()
-        import akshare as ak
         df = ak.stock_zh_index_spot_sina()
         if df is None or df.empty:
             return [{'name': n, 'price': 0, 'change_pct': 0, 'volume': 0} 
@@ -463,8 +245,6 @@ def get_limit_stats() -> Dict[str, int]:
 def get_sectors() -> List[Dict[str, Any]]:
     """获取板块涨幅排名"""
     try:
-        _enforce_rate_limit()
-        import akshare as ak
         df = ak.stock_board_industry_name_em()
         if df is None or df.empty:
             return []
@@ -481,8 +261,6 @@ def get_sectors() -> List[Dict[str, Any]]:
 def get_first_limit_ups() -> List[Dict[str, str]]:
     """获取率先涨停的股票"""
     try:
-        _enforce_rate_limit()
-        import akshare as ak
         today = datetime.now().strftime('%Y%m%d')
         df = ak.stock_zt_pool_em(date=today)
         if df is None or df.empty:
@@ -499,7 +277,7 @@ def get_first_limit_ups() -> List[Dict[str, str]]:
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("测试市场涨跌统计（多数据源）")
+    print("测试市场涨跌统计")
     print("=" * 50)
     
     stats = get_market_stats()
