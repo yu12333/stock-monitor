@@ -41,12 +41,13 @@ jobs:
       - name: 运行股票监控
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-          # 清除代理设置，避免代理问题
-          HTTP_PROXY: ''
-          HTTPS_PROXY: ''
-          http_proxy: ''
-          https_proxy: ''
         run: |
+          # 清除代理设置
+          unset HTTP_PROXY
+          unset HTTPS_PROXY
+          unset http_proxy
+          unset https_proxy
+          
           # 获取北京时间
           BEIJING_HOUR=$(TZ='Asia/Shanghai' date +%H)
           BEIJING_MINUTE=$(TZ='Asia/Shanghai' date +%M)
